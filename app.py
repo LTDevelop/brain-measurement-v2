@@ -4,87 +4,96 @@ import numpy as np
 import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("🧠 Medidor de Cérebros - Versão Final")
+st.title("🧠 Brain Measurement Tool")
 
-# Barra lateral com controles
+# Sidebar controls
 with st.sidebar:
-    st.header("⚙️ Controles de Detecção")
-    threshold = st.slider("Limiar de brilho", 0, 255, 180, help="Valores mais altos = áreas mais claras")
-    min_area = st.slider("Área mínima (pixels)", 50, 500, 150)
-    blur_size = st.slider("Suavização", 1, 15, 5, step=2)
+    st.header("⚙️ Detection Settings")
+    threshold = st.slider("Brightness threshold", 0, 255, 180, help="Higher values = brighter areas only")
+    min_area = st.slider("Minimum area (pixels)", 50, 500, 150)
+    max_area = st.slider("Maximum area (cm²)", 0.5, 5.0, 2.0, step=0.1)  # New max area control
+    blur_size = st.slider("Smoothing", 1, 15, 5, step=2)
 
-def processar_imagem(img, threshold, min_area, blur_size):
-    # Pré-processamento
-    cinza = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    cinza = cv2.GaussianBlur(cinza, (blur_size, blur_size), 0)
+def process_image(img, threshold, min_area, max_area, blur_size):
+    # Pre-processing
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
     
-    # Segmentação dos cérebros (áreas claras)
-    _, bin_cerebros = cv2.threshold(cinza, threshold, 255, cv2.THRESH_BINARY)
+    # Brain segmentation (bright areas)
+    _, brain_bin = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
     kernel = np.ones((3,3), np.uint8)
-    bin_cerebros = cv2.morphologyEx(bin_cerebros, cv2.MORPH_CLOSE, kernel)
+    brain_bin = cv2.morphologyEx(brain_bin, cv2.MORPH_CLOSE, kernel)
     
-    # Detecção dos cérebros
-    contornos, _ = cv2.findContours(bin_cerebros, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cerebros = [cnt for cnt in contornos if cv2.contourArea(cnt) > min_area]
+    # Detect brains
+    contours, _ = cv2.findContours(brain_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    ####################################################
-    # DETECÇÃO MELHORADA DA RÉGUA (PARTE CRÍTICA)
-    ####################################################
-    roi_regua = cinza[-150:, :]  # Região de interesse (parte inferior)
-    _, bin_regua = cv2.threshold(roi_regua, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    ##############################################
+    # IMPROVED RULER DETECTION (CRITICAL PART)
+    ##############################################
+    roi_ruler = gray[-150:, :]  # Bottom 150 pixels
+    _, ruler_bin = cv2.threshold(roi_ruler, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     
-    # Detecta linhas horizontais (traços da régua)
-    lines = cv2.HoughLinesP(bin_regua, 1, np.pi/180, threshold=50, 
+    # Detect horizontal lines (ruler marks)
+    lines = cv2.HoughLinesP(ruler_bin, 1, np.pi/180, threshold=50, 
                           minLineLength=50, maxLineGap=10)
     
-    escala = None
+    scale = None
     if lines is not None:
-        # Filtra apenas linhas horizontais (ângulo < 5 graus)
-        linhas_horizontais = []
+        # Filter horizontal lines (angle < 5 degrees)
+        horizontal_lines = []
         for line in lines:
             x1, y1, x2, y2 = line[0]
             angle = abs(np.degrees(np.arctan2(y2-y1, x2-x1)))
             if angle < 5:
-                linhas_horizontais.append(line)
+                horizontal_lines.append(line)
         
-        if len(linhas_horizontais) >= 2:
-            # Calcula a distância entre o primeiro e último traço
-            x_coords = [x for line in linhas_horizontais for x in [line[0][0], line[0][2]]]
+        if len(horizontal_lines) >= 2:
+            # Calculate distance between first and last mark
+            x_coords = [x for line in horizontal_lines for x in [line[0][0], line[0][2]]]
             x_min, x_max = min(x_coords), max(x_coords)
-            dist_total_pixels = x_max - x_min
+            total_dist_px = x_max - x_min
             
-            # Supondo que a régua visível tem 10cm
-            escala = 10.0 / dist_total_pixels  # cm/pixel
+            # Assuming visible ruler shows 10cm
+            scale = 10.0 / total_dist_px  # cm/pixel
             
-            # Debug visual (opcional)
+            # Visual debug (optional)
             cv2.rectangle(img, (x_min, img.shape[0]-150), 
                          (x_max, img.shape[0]), (255,0,255), 2)
-    ####################################################
+    ##############################################
 
-    # Preparar resultados
-    img_resultado = img.copy()
-    resultados = []
+    # Process results
+    result_img = img.copy()
+    brains = []
     
-    for i, cnt in enumerate(cerebros):
+    # Sort contours left-to-right before processing
+    contours_sorted = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
+    
+    for i, cnt in enumerate(contours_sorted):
         area_px = cv2.contourArea(cnt)
-        area_cm = area_px * (escala ** 2) if escala else 0
+        area_cm = area_px * (scale ** 2) if scale else 0
+        
+        # Apply area filters
+        if area_px < min_area: continue
+        if scale and (area_cm > max_area): continue
         
         x,y,w,h = cv2.boundingRect(cnt)
-        cv2.drawContours(img_resultado, [cnt], -1, (0,255,0), 2)
-        cv2.putText(img_resultado, f"{i+1}", (x,y-10), 
+        
+        # Draw with sequential numbering
+        cv2.drawContours(result_img, [cnt], -1, (0,255,0), 2)
+        cv2.putText(result_img, f"{i+1}", (x,y-10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
         
-        resultados.append({
+        brains.append({
             "ID": i+1,
-            "Área (cm²)": round(area_cm, 2),
-            "Centroide X": x + w//2,
-            "Centroide Y": y + h//2
+            "Area (cm²)": round(area_cm, 2),
+            "Centroid X": x + w//2,
+            "Centroid Y": y + h//2
         })
 
-    return img_resultado, len(cerebros), escala, pd.DataFrame(resultados)
+    return result_img, len(brains), scale, pd.DataFrame(brains)
 
-# Interface principal
-upload = st.file_uploader("Carregue imagem com cérebros e régua de 10cm na base:", 
+# Main interface
+upload = st.file_uploader("Upload image with 10cm ruler at bottom:", 
                          type=["jpg", "png", "tif"])
 
 if upload:
@@ -94,41 +103,41 @@ if upload:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.image(img, channels="BGR", caption="Imagem Original", use_column_width=True)
+        st.image(img, channels="BGR", caption="Original Image", use_column_width=True)
         
     with col2:
-        resultado = processar_imagem(img, threshold, min_area, blur_size)
+        result = process_image(img, threshold, min_area, max_area, blur_size)
         
-        if resultado:
-            img_processada, num_cerebros, escala, df_resultados = resultado
-            st.image(img_processada, channels="BGR", 
-                   caption=f"Cérebros Detectados: {num_cerebros}", 
+        if result:
+            processed_img, num_brains, scale, df_results = result
+            st.image(processed_img, channels="BGR", 
+                   caption=f"Detected Brains: {num_brains}", 
                    use_column_width=True)
             
-            if escala:
-                st.success(f"Escala calculada: 1cm = {1/escala:.1f} pixels")
-                st.metric("Área Média", f"{df_resultados['Área (cm²)'].mean():.2f} cm²")
+            if scale:
+                st.success(f"Scale: 1cm = {1/scale:.1f} pixels")
+                st.metric("Average Area", f"{df_results['Area (cm²)'].mean():.2f} cm²")
             else:
-                st.error("Régua não detectada! Verifique se está visível na base.")
+                st.error("Ruler not detected! Ensure it's visible at the bottom.")
             
-            st.dataframe(df_resultados, hide_index=True)
+            st.dataframe(df_results, hide_index=True)
             
-            # Botão de download
-            csv = df_resultados.to_csv(index=False, sep=";").encode('utf-8')
+            # Download button
+            csv = df_results.to_csv(index=False, sep=";").encode('utf-8')
             st.download_button(
-                "📥 Exportar Resultados",
+                "📥 Export Results",
                 data=csv,
-                file_name="areas_cerebros.csv",
+                file_name="brain_areas.csv",
                 mime="text/csv"
             )
 
-# Dicas de uso
-with st.expander("💡 Instruções de uso"):
+# Usage instructions
+with st.expander("💡 Usage Guide"):
     st.markdown("""
-    1. **Posicione a régua**: Deve estar na **parte inferior** da imagem, com os traços de 1 a 10cm visíveis
-    2. **Iluminação**: Fundo escuro e cérebros claros funcionam melhor
-    3. **Ajustes finos**:
-       - Aumente o **limiar** se detectar muito fundo
-       - Aumente a **área mínima** para filtrar fragmentos
-    4. **Verifique a régua**: A área rosa na imagem processada deve cobrir toda a régua
+    1. **Position ruler**: Must be at the **bottom** with 1-10cm marks visible
+    2. **Lighting**: Dark background with bright brains works best
+    3. **Fine-tuning**:
+       - Increase **threshold** if detecting too much background
+       - Adjust **area limits** to filter fragments/large clusters
+    4. **Verify ruler**: Purple area should cover the entire ruler
     """)
