@@ -1,94 +1,113 @@
 import streamlit as st
 import cv2
 import numpy as np
-import pandas as pd  # Adicionado para exportar CSV
+import pandas as pd  # Adicionado para gerar a planilha
 
-# Configurações iniciais
 st.set_page_config(layout="wide")
-st.title("🧠 Medidor de Cérebros - Versão Estável")
+st.title("🧠 Medidor de Cérebros - Modo Claro")
 
-# Função principal (igual à que você aprovou)
-def processar_imagem(image):
-    # 1. Pré-processamento
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+# Barra lateral com controles
+with st.sidebar:
+    st.header("⚙️ Ajustes de Detecção")
+    threshold = st.slider("Limiar de brilho", 50, 250, 180, help="Valores mais altos = apenas áreas mais claras")
+    min_area = st.slider("Área mínima (pixels)", 50, 500, 150, help="Filtra fragmentos pequenos")
+    blur_size = st.slider("Suavização", 1, 15, 5, step=2, help="Reduz ruídos (use números ímpares)")
+
+def processar_imagem(img, threshold, min_area, blur_size):
+    # Converter para escala de cinza e suavizar
+    cinza = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    cinza = cv2.GaussianBlur(cinza, (blur_size, blur_size), 0)
     
-    # 2. Detectar régua (parte inferior)
-    roi_height = 100
-    roi = image[image.shape[0]-roi_height:, :]
-    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    _, ruler_bin = cv2.threshold(roi_gray, 200, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(ruler_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # DETECÇÃO DE CÉREBROS CLAROS
+    _, bin_cerebros = cv2.threshold(cinza, threshold, 255, cv2.THRESH_BINARY)
     
-    if not contours:
-        st.error("⚠️ Régua não detectada! Posicione uma régua de 1cm na parte inferior.")
-        return None
+    # Operações morfológicas para limpeza
+    kernel = np.ones((3,3), np.uint8)
+    bin_cerebros = cv2.morphologyEx(bin_cerebros, cv2.MORPH_CLOSE, kernel)
     
-    # 3. Calcular escala
-    x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
-    scale_cm = 1.0 / w  # cm por pixel
+    # Encontrar contornos
+    contornos, _ = cv2.findContours(bin_cerebros, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # 4. Segmentar cérebros
-    _, brain_bin = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY)
-    brain_contours, _ = cv2.findContours(brain_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # 5. Filtrar contornos pequenos
-    min_area = (50 * (1/scale_cm)) ** 2  # 50px² em unidades de imagem
-    brains = [cnt for cnt in brain_contours if cv2.contourArea(cnt) > min_area]
-    
-    # 6. Calcular métricas
-    total_area_px = sum(cv2.contourArea(cnt) for cnt in brains)
-    total_area_cm2 = total_area_px * (scale_cm ** 2)
-    
-    # 7. Visualização
-    result_img = image.copy()
-    cv2.drawContours(result_img, brains, -1, (0, 255, 0), 3)
-    cv2.rectangle(result_img, (x, y+image.shape[0]-roi_height), 
-                 (x+w, y+h+image.shape[0]-roi_height), (255, 0, 0), 2)
-    
-    # 8. Criar tabela de resultados (NOVO)
-    results = []
-    for i, cnt in enumerate(brains):
-        area_px = cv2.contourArea(cnt)
-        area_cm2 = area_px * (scale_cm ** 2)
-        x_cnt, y_cnt, w_cnt, h_cnt = cv2.boundingRect(cnt)
+    # Filtrar por área e proporção
+    cerebros = []
+    for cnt in contornos:
+        area = cv2.contourArea(cnt)
+        x,y,w,h = cv2.boundingRect(cnt)
+        aspect_ratio = w/h
         
-        results.append({
+        if area > min_area and 0.3 < aspect_ratio < 3.0:
+            cerebros.append(cnt)
+    
+    # Detecção da régua (parte inferior)
+    roi = cinza[-100:, :]
+    _, bin_regua = cv2.threshold(roi, 200, 255, cv2.THRESH_BINARY_INV)
+    contornos_regua, _ = cv2.findContours(bin_regua, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Calcular escala se régua for detectada
+    escala = None
+    if contornos_regua:
+        x_r, y_r, w_r, h_r = cv2.boundingRect(max(contornos_regua, key=cv2.contourArea))
+        escala = 1.0 / w_r  # cm/pixel
+    
+    # Preparar resultados para a planilha (NOVO)
+    resultados = []
+    img_resultado = img.copy()
+    
+    for i, cnt in enumerate(cerebros):
+        area_px = cv2.contourArea(cnt)
+        area_cm = area_px * (escala ** 2) if escala else area_px
+        
+        # Desenhar contorno
+        cv2.drawContours(img_resultado, [cnt], -1, (0, 255, 0), 2)
+        cv2.putText(img_resultado, f"{i+1}", (x,y-10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
+        
+        # Adicionar dados para a planilha
+        resultados.append({
             "ID": i+1,
-            "Área (cm²)": round(area_cm2, 2),
-            "Centro X": x_cnt + w_cnt//2,
-            "Centro Y": y_cnt + h_cnt//2
+            "Área (px²)": int(area_px),
+            "Área (cm²)": round(area_cm, 4) if escala else "N/A",
+            "Centro X": x + w//2,
+            "Centro Y": y + h//2
         })
     
-    return result_img, total_area_cm2, len(brains), pd.DataFrame(results)  # Retorna o DataFrame
-
-# Interface do usuário
-uploaded_file = st.file_uploader("Upload de imagem com régua de 1cm:", type=["jpg", "png"])
-
-if uploaded_file is not None:
-    # Carregar imagem
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    # Desenhar régua se detectada
+    if contornos_regua:
+        cv2.rectangle(img_resultado, (x_r, y_r+img.shape[0]-100), 
+                     (x_r+w_r, y_r+h_r+img.shape[0]-100), (255,0,0), 2)
     
-    # Processar
-    results = processar_imagem(image)
+    return img_resultado, len(cerebros), escala, pd.DataFrame(resultados)  # Retorna o DataFrame
+
+# Interface principal
+upload = st.file_uploader("Carregue imagem com cérebros claros e fundo escuro:", type=["jpg","png"])
+
+if upload:
+    file_bytes = np.asarray(bytearray(upload.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     
-    if results:
-        processed_img, total_area, brain_count, df_results = results
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.image(img, channels="BGR", caption="Imagem Original", use_column_width=True)
         
-        # Mostrar resultados
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(processed_img, channels="BGR", use_column_width=True)
+    with col2:
+        resultado = processar_imagem(img, threshold, min_area, blur_size)
         
-        with col2:
-            st.metric("Área Total", f"{total_area:.2f} cm²")
-            st.metric("Número de Cérebros", brain_count)
+        if resultado:
+            img_processada, num_cerebros, escala, df_resultados = resultado
+            st.image(img_processada, channels="BGR", caption=f"Cérebros Detectados: {num_cerebros}", use_column_width=True)
             
-            # Mostrar tabela (NOVO)
-            st.dataframe(df_results, hide_index=True)
+            # Mostrar métricas
+            st.metric("Total de Cérebros", num_cerebros)
+            if escala:
+                st.metric("Escala", f"{escala:.4f} cm/pixel")
+            else:
+                st.warning("Régua não detectada - medidas em pixels")
             
-            # Botão de download (NOVO)
-            csv = df_results.to_csv(index=False, sep=";").encode('utf-8')
+            # Mostrar e baixar planilha (NOVO)
+            st.dataframe(df_resultados, hide_index=True)
+            
+            csv = df_resultados.to_csv(index=False, sep=";").encode('utf-8')
             st.download_button(
                 label="📥 Baixar Planilha (CSV)",
                 data=csv,
@@ -96,10 +115,13 @@ if uploaded_file is not None:
                 mime="text/csv"
             )
 
-# Instruções de uso
-with st.expander("ℹ️ Instruções"):
+# Dicas de uso
+with st.expander("💡 Dicas para melhor detecção"):
     st.markdown("""
-    1. **Posicione uma régua de 1cm na parte inferior da imagem**
-    2. **Certifique-se de que os cérebros estão claramente visíveis**
-    3. **Ajuste o limite (threshold) na barra lateral se necessário**
+    1. **Iluminação uniforme**: Evite sombras e reflexos
+    2. **Fundo escuro**: Cérebros devem ser mais claros que o fundo
+    3. **Régua preta**: Posicione na parte inferior
+    4. **Ajuste fino**:
+       - Aumente o **limiar** para capturar apenas áreas muito claras
+       - Aumente a **área mínima** para ignorar fragmentos
     """)
