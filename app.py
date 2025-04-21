@@ -1,155 +1,105 @@
 import streamlit as st
 import cv2
 import numpy as np
-import pandas as pd
+import pandas as pd  # Adicionado para exportar CSV
 
+# Configurações iniciais
 st.set_page_config(layout="wide")
-st.title("🧠 Segmentação Avançada de Cérebros")
+st.title("🧠 Medidor de Cérebros - Versão Estável")
 
-# Controles na barra lateral
-with st.sidebar:
-    st.header("🔧 Controles Avançados")
+# Função principal (igual à que você aprovou)
+def processar_imagem(image):
+    # 1. Pré-processamento
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # Controles de cor
-    st.subheader("Faixa de Cores (HSV)")
-    h_min = st.slider("Hue Mínimo", 0, 179, 0)
-    h_max = st.slider("Hue Máximo", 0, 179, 179)
-    s_min = st.slider("Saturation Mínima", 0, 255, 50)
-    s_max = st.slider("Saturation Máxima", 0, 255, 255)
-    v_min = st.slider("Value Mínimo", 0, 255, 150)  # Foca em tons claros
-    v_max = st.slider("Value Máximo", 0, 255, 255)
+    # 2. Detectar régua (parte inferior)
+    roi_height = 100
+    roi = image[image.shape[0]-roi_height:, :]
+    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    _, ruler_bin = cv2.threshold(roi_gray, 200, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(ruler_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Controles geométricos
-    st.subheader("Filtros Geométricos")
-    min_area_cm = st.slider("Área mínima (cm²)", 0.1, 5.0, 0.8, step=0.1)
-    max_area_cm = st.slider("Área máxima (cm²)", 0.5, 20.0, 5.0, step=0.1)
-    solidity_thresh = st.slider("Solidez Mínima", 0.7, 1.0, 0.85, help="Filtra formas irregulares")
-
-def processar_imagem(img, params):
-    # Converter para HSV
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    
-    # Criar máscara baseada nos parâmetros HSV
-    lower = np.array([params['h_min'], params['s_min'], params['v_min']])
-    upper = np.array([params['h_max'], params['s_max'], params['v_max']])
-    mask = cv2.inRange(hsv, lower, upper)
-    
-    # Operações morfológicas
-    kernel = np.ones((5,5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-    
-    # Detecção da régua (para cálculo de escala)
-    roi = img[-150:, :, :]
-    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    _, bin_regua = cv2.threshold(gray_roi, 0, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-    contornos_regua, _ = cv2.findContours(bin_regua, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contornos_regua:
-        st.error("⚠️ Régua não detectada! Posicione uma régua de 1cm na base.")
+    if not contours:
+        st.error("⚠️ Régua não detectada! Posicione uma régua de 1cm na parte inferior.")
         return None
     
-    # Calcular escala
-    x_r, y_r, w_r, h_r = cv2.boundingRect(max(contornos_regua, key=cv2.contourArea))
-    escala = 1.0 / w_r  # cm/pixel
-    min_area_px = params['min_area_cm'] / (escala ** 2)
-    max_area_px = params['max_area_cm'] / (escala ** 2)
+    # 3. Calcular escala
+    x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    scale_cm = 1.0 / w  # cm por pixel
     
-    # Encontrar contornos na máscara
-    contornos, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 4. Segmentar cérebros
+    _, brain_bin = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY)
+    brain_contours, _ = cv2.findContours(brain_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Processar cada contorno
-    resultados = []
-    img_resultado = img.copy()
+    # 5. Filtrar contornos pequenos
+    min_area = (50 * (1/scale_cm)) ** 2  # 50px² em unidades de imagem
+    brains = [cnt for cnt in brain_contours if cv2.contourArea(cnt) > min_area]
     
-    for i, cnt in enumerate(contornos):
-        area = cv2.contourArea(cnt)
-        hull = cv2.convexHull(cnt)
-        hull_area = cv2.contourArea(hull)
-        solidity = float(area)/hull_area if hull_area > 0 else 0
+    # 6. Calcular métricas
+    total_area_px = sum(cv2.contourArea(cnt) for cnt in brains)
+    total_area_cm2 = total_area_px * (scale_cm ** 2)
+    
+    # 7. Visualização
+    result_img = image.copy()
+    cv2.drawContours(result_img, brains, -1, (0, 255, 0), 3)
+    cv2.rectangle(result_img, (x, y+image.shape[0]-roi_height), 
+                 (x+w, y+h+image.shape[0]-roi_height), (255, 0, 0), 2)
+    
+    # 8. Criar tabela de resultados (NOVO)
+    results = []
+    for i, cnt in enumerate(brains):
+        area_px = cv2.contourArea(cnt)
+        area_cm2 = area_px * (scale_cm ** 2)
+        x_cnt, y_cnt, w_cnt, h_cnt = cv2.boundingRect(cnt)
         
-        if (min_area_px <= area <= max_area_px) and (solidity >= params['solidity_thresh']):
-            x,y,w,h = cv2.boundingRect(cnt)
-            
-            # Desenhar e anotar
-            cv2.drawContours(img_resultado, [cnt], -1, (0,255,0), 2)
-            cv2.putText(img_resultado, f"{i+1}", (x,y-10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-            
-            resultados.append({
-                "Cérebro": i+1,
-                "Área (cm²)": round(area * (escala ** 2), 2),
-                "Solidez": round(solidity, 2),
-                "Centroide (x,y)": (x+w//2, y+h//2)
-            })
+        results.append({
+            "ID": i+1,
+            "Área (cm²)": round(area_cm2, 2),
+            "Centro X": x_cnt + w_cnt//2,
+            "Centro Y": y_cnt + h_cnt//2
+        })
     
-    # Visualizações intermediárias para debug
-    debug_imgs = {
-        "Máscara HSV": mask,
-        "Contornos": cv2.drawContours(np.zeros_like(img), contornos, -1, (0,255,0), 1),
-        "Régua Detectada": cv2.rectangle(roi.copy(), (x_r,y_r), (x_r+w_r,y_r+h_r), (255,0,0), 2)
-    }
-    
-    return img_resultado, debug_imgs, pd.DataFrame(resultados), escala
+    return result_img, total_area_cm2, len(brains), pd.DataFrame(results)  # Retorna o DataFrame
 
-# Interface principal
-upload = st.file_uploader("Carregue imagem:", type=["jpg","png","tif"])
+# Interface do usuário
+uploaded_file = st.file_uploader("Upload de imagem com régua de 1cm:", type=["jpg", "png"])
 
-if upload:
-    file_bytes = np.asarray(bytearray(upload.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+if uploaded_file is not None:
+    # Carregar imagem
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     
-    # Coletar parâmetros
-    params = {
-        'h_min': h_min, 'h_max': h_max,
-        's_min': s_min, 's_max': s_max,
-        'v_min': v_min, 'v_max': v_max,
-        'min_area_cm': min_area_cm,
-        'max_area_cm': max_area_cm,
-        'solidity_thresh': solidity_thresh
-    }
+    # Processar
+    results = processar_imagem(image)
     
-    # Processamento
-    resultado = processar_imagem(img, params)
-    
-    if resultado:
-        img_final, debug_imgs, df_resultados, escala = resultado
+    if results:
+        processed_img, total_area, brain_count, df_results = results
         
-        # Layout de resultados
-        tab1, tab2 = st.tabs(["Resultado Final", "Debug"])
+        # Mostrar resultados
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(processed_img, channels="BGR", use_column_width=True)
         
-        with tab1:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.image(img, channels="BGR", caption="Original", use_column_width=True)
-            with col2:
-                st.image(img_final, channels="BGR", caption="Cérebros Detectados", use_column_width=True)
-                
-            st.dataframe(df_resultados, hide_index=True)
+        with col2:
+            st.metric("Área Total", f"{total_area:.2f} cm²")
+            st.metric("Número de Cérebros", brain_count)
             
-            # Botão de download
-            csv = df_resultados.to_csv(index=False).encode('utf-8')
+            # Mostrar tabela (NOVO)
+            st.dataframe(df_results, hide_index=True)
+            
+            # Botão de download (NOVO)
+            csv = df_results.to_csv(index=False, sep=";").encode('utf-8')
             st.download_button(
-                "📥 Exportar Resultados (CSV)",
+                label="📥 Baixar Planilha (CSV)",
                 data=csv,
-                file_name="resultados_cerebros.csv",
+                file_name="areas_cerebros.csv",
                 mime="text/csv"
             )
-        
-        with tab2:
-            st.warning("Ajuste os parâmetros na barra lateral com base nestas visualizações")
-            for name, debug_img in debug_imgs.items():
-                st.image(debug_img, caption=name, use_column_width=True)
 
-# Guia de uso
-with st.expander("🎚️ Como Ajustar os Parâmetros"):
+# Instruções de uso
+with st.expander("ℹ️ Instruções"):
     st.markdown("""
-    **Para cérebros claros em fundo escuro:**
-    - ✅ **Value Mínimo**: 150-200 (filtra fundos escuros)
-    - ✅ **Saturation Mínima**: 50+ (remove tons cinza)
-    
-    **Para melhor precisão:**
-    - 🔍 Aumente a **Solidez** para filtrar formas irregulares
-    - 📏 Defina **Área Mín/Máx** conforme o tamanho esperado
-    - 🖌️ Use a aba **Debug** para visualizar a máscara HSV
+    1. **Posicione uma régua de 1cm na parte inferior da imagem**
+    2. **Certifique-se de que os cérebros estão claramente visíveis**
+    3. **Ajuste o limite (threshold) na barra lateral se necessário**
     """)
