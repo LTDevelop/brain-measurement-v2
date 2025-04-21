@@ -38,18 +38,33 @@ def processar_imagem(img, threshold, min_area, blur_size):
         if area > min_area and 0.3 < aspect_ratio < 3.0:
             cerebros.append(cnt)
     
-    # Detecção da régua (parte inferior)
-    roi = cinza[-100:, :]
-    _, bin_regua = cv2.threshold(roi, 200, 255, cv2.THRESH_BINARY_INV)
+    # DETECÇÃO MELHORADA DA RÉGUA (PARTE MODIFICADA)
+    roi_regua = cinza[-150:, :]  # Analisa os últimos 150 pixels
+    _, bin_regua = cv2.threshold(roi_regua, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Encontrar todos os traços da régua
     contornos_regua, _ = cv2.findContours(bin_regua, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Calcular escala se régua for detectada
-    escala = None
-    if contornos_regua:
-        x_r, y_r, w_r, h_r = cv2.boundingRect(max(contornos_regua, key=cv2.contourArea))
-        escala = 1.0 / w_r  # cm/pixel
+    # Filtrar apenas os traços principais (considerando que a régua tem 10cm)
+    tracos = []
+    for cnt in contornos_regua:
+        x,y,w,h = cv2.boundingRect(cnt)
+        if w > 20 and h > 5:  # Filtra pequenos ruídos
+            tracos.append((x, w))
     
-    # Preparar resultados para a planilha (NOVO)
+    # Ordenar os traços da esquerda para direita
+    tracos.sort()
+    
+    # Calcular escala baseada na distância entre os traços (assumindo 10cm = distância total)
+    if len(tracos) >= 2:
+        x_inicio, _ = tracos[0]
+        x_fim, _ = tracos[-1]
+        distancia_pixels = x_fim - x_inicio
+        escala = 10.0 / distancia_pixels  # cm/pixel (10cm totais na régua)
+    else:
+        escala = None
+    
+    # Preparar resultados para a planilha
     resultados = []
     img_resultado = img.copy()
     
@@ -71,12 +86,11 @@ def processar_imagem(img, threshold, min_area, blur_size):
             "Centro Y": y + h//2
         })
     
-    # Desenhar régua se detectada
-    if contornos_regua:
-        cv2.rectangle(img_resultado, (x_r, y_r+img.shape[0]-100), 
-                     (x_r+w_r, y_r+h_r+img.shape[0]-100), (255,0,0), 2)
+    # Desenhar região da régua se detectada
+    if escala:
+        cv2.rectangle(img_resultado, (0, img.shape[0]-150), (img.shape[1], img.shape[0]), (255,0,0), 2)
     
-    return img_resultado, len(cerebros), escala, pd.DataFrame(resultados)  # Retorna o DataFrame
+    return img_resultado, len(cerebros), escala, pd.DataFrame(resultados)
 
 # Interface principal
 upload = st.file_uploader("Carregue imagem com cérebros claros e fundo escuro:", type=["jpg","png"])
