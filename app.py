@@ -1,62 +1,68 @@
 import streamlit as st
 import cv2
 import numpy as np
+import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("🧠 Medidor de Cérebros - Modo Claro")
+st.title("🧠 Medidor de Cérebros - Modo Profissional")
 
-# Barra lateral com controles
+# Barra lateral
 with st.sidebar:
-    st.header("⚙️ Ajustes de Detecção")
-    threshold = st.slider("Limiar de brilho", 50, 250, 180, help="Valores mais altos = apenas áreas mais claras")
-    min_area = st.slider("Área mínima (pixels)", 50, 500, 150, help="Filtra fragmentos pequenos")
-    blur_size = st.slider("Suavização", 1, 15, 5, step=2, help="Reduz ruídos (use números ímpares)")
+    st.header("⚙️ Controles")
+    threshold = st.slider("Limiar de brilho", 50, 250, 180)
+    min_area_cm = st.slider("Área mínima (cm²)", 0.1, 2.0, 0.5, step=0.1)
+    blur_size = st.slider("Suavização", 1, 15, 5, step=2)
 
-def processar_imagem(img, threshold, min_area, blur_size):
-    # Converter para escala de cinza e suavizar
+def processar_imagem(img, threshold, min_area_cm, blur_size):
     cinza = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     cinza = cv2.GaussianBlur(cinza, (blur_size, blur_size), 0)
     
-    # DETECÇÃO DE CÉREBROS CLAROS (mudança principal)
-    _, bin_cerebros = cv2.threshold(cinza, threshold, 255, cv2.THRESH_BINARY)  # Agora pega áreas CLARAS
-    
-    # Operações morfológicas para limpeza
-    kernel = np.ones((3,3), np.uint8)
-    bin_cerebros = cv2.morphologyEx(bin_cerebros, cv2.MORPH_CLOSE, kernel)
-    
-    # Encontrar contornos
-    contornos, _ = cv2.findContours(bin_cerebros, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Filtrar por área e proporção
-    cerebros = []
-    for cnt in contornos:
-        area = cv2.contourArea(cnt)
-        x,y,w,h = cv2.boundingRect(cnt)
-        aspect_ratio = w/h
-        
-        if area > min_area and 0.3 < aspect_ratio < 3.0:  # Filtra formatos irregulares
-            cerebros.append(cnt)
-    
-    # Detecção da régua (parte inferior)
-    roi = cinza[-100:, :]
+    # Detecção da régua
+    roi = cinza[-150:, :]
     _, bin_regua = cv2.threshold(roi, 200, 255, cv2.THRESH_BINARY_INV)
     contornos_regua, _ = cv2.findContours(bin_regua, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Preparar imagem de resultado
+    if not contornos_regua:
+        st.warning("Posicione uma régua de 1cm na base da imagem")
+        return None
+    
+    # Cálculo da escala
+    x_r, y_r, w_r, h_r = cv2.boundingRect(max(contornos_regua, key=cv2.contourArea))
+    escala = 1.0 / w_r  # cm/pixel
+    min_area_px = min_area_cm / (escala ** 2)  # Converte cm² para pixels
+
+    # Detecção dos cérebros
+    _, bin_cerebros = cv2.threshold(cinza, threshold, 255, cv2.THRESH_BINARY)
+    contornos, _ = cv2.findContours(bin_cerebros, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Processamento dos resultados
+    resultados = []
     img_resultado = img.copy()
-    cv2.drawContours(img_resultado, cerebros, -1, (0, 255, 0), 2)
     
-    if contornos_regua:
-        x_r, y_r, w_r, h_r = cv2.boundingRect(max(contornos_regua, key=cv2.contourArea))
-        cv2.rectangle(img_resultado, (x_r, y_r+img.shape[0]-100), (x_r+w_r, y_r+h_r+img.shape[0]-100), (255,0,0), 2)
-        escala = 1.0 / w_r  # cm/pixel
-    else:
-        escala = None
+    for i, cnt in enumerate(contornos):
+        area_px = cv2.contourArea(cnt)
+        area_cm = area_px * (escala ** 2)
+        
+        if area_cm >= min_area_cm:
+            x,y,w,h = cv2.boundingRect(cnt)
+            cv2.drawContours(img_resultado, [cnt], -1, (0,255,0), 2)
+            cv2.putText(img_resultado, f"{i+1}", (x,y-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+            
+            resultados.append({
+                "Cérebro": i+1,
+                "Área (cm²)": round(area_cm, 2),
+                "Centroide (x,y)": (x + w//2, y + h//2)
+            })
+
+    # Desenha régua
+    cv2.rectangle(img_resultado, (x_r, y_r+img.shape[0]-150), 
+                 (x_r+w_r, y_r+h_r+img.shape[0]-150), (255,0,0), 2)
     
-    return img_resultado, len(cerebros), escala
+    return img_resultado, pd.DataFrame(resultados), escala
 
 # Interface principal
-upload = st.file_uploader("Carregue imagem com cérebros claros e fundo escuro:", type=["jpg","png"])
+upload = st.file_uploader("Carregue imagem:", type=["jpg","png"])
 
 if upload:
     file_bytes = np.asarray(bytearray(upload.read()), dtype=np.uint8)
@@ -65,29 +71,26 @@ if upload:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.image(img, channels="BGR", caption="Imagem Original", use_column_width=True)
+        st.image(img, channels="BGR", caption="Original", use_column_width=True)
         
     with col2:
-        resultado = processar_imagem(img, threshold, min_area, blur_size)
+        resultado = processar_imagem(img, threshold, min_area_cm, blur_size)
         
         if resultado:
-            img_processada, num_cerebros, escala = resultado
-            st.image(img_processada, channels="BGR", caption=f"Cérebros Detectados: {num_cerebros}", use_column_width=True)
+            img_processada, df_resultados, escala = resultado
+            st.image(img_processada, channels="BGR", use_column_width=True)
             
-            st.success("✅ Ajuste os parâmetros na barra lateral para refinar a detecção")
-            st.metric("Total de Cérebros", num_cerebros)
+            # Exibe tabela com métricas
+            st.dataframe(df_resultados, hide_index=True)
             
-            if escala:
-                st.metric("Escala", f"{escala:.4f} cm/pixel")
-            else:
-                st.warning("Régua não detectada - medidas em pixels")
-
-# Dicas de uso
-st.expander("💡 Dicas para melhor detecção").markdown("""
-1. **Iluminação uniforme**: Evite sombras e reflexos
-2. **Fundo escuro**: Cérebros devem ser mais claros que o fundo
-3. **Régua preta**: Posicione na parte inferior
-4. **Ajuste fino**:
-   - Aumente o **limiar** para capturar apenas áreas muito claras
-   - Aumente a **área mínima** para ignorar fragmentos
-""")
+            # Botão de download
+            csv = df_resultados.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Baixar resultados (CSV)",
+                data=csv,
+                file_name="areas_cerebros.csv",
+                mime="text/csv"
+            )
+            
+            st.metric("Escala", f"{escala:.4f} cm/pixel")
+            st.metric("Total de Cérebros", len(df_resultados))
